@@ -60,7 +60,7 @@ def get_number_frequencies():
         freq = all_nums.value_counts().reset_index()
         freq.columns = ['number', 'count']
         
-        # 強制將號碼轉換為整數 (避免 pandas 在合併時將其轉為浮點數導致後續格式化報錯)
+        # 強制將號碼轉換為整數
         freq['number'] = freq['number'].astype(int)
         
         return freq.sort_values(by='count', ascending=False)
@@ -101,6 +101,7 @@ if page == "🤖 策略選號預測引擎":
     with col1:
         st.subheader("⚙️ 參數設定")
         strategy = st.selectbox("請選擇預測策略：", [
+            "歷史機率加權演算法 (依統計機率分配權重)", # 🌟 新增的機率預測模型
             "高期望值與常態分佈過濾法 (資料科學推薦)",
             "均衡演算法 (熱門+冷門+隨機)", 
             "追熱牌策略 (從最常開出號碼挑選)", 
@@ -116,11 +117,27 @@ if page == "🤖 策略選號預測引擎":
             for i in range(generate_count):
                 picks = []
                 
-                # --- 策略 1: 高期望值與常態分佈過濾法 ---
-                if strategy == "高期望值與常態分佈過濾法 (資料科學推薦)":
+                # --- 策略 1: 歷史機率加權演算法 (統計概率) ---
+                if strategy == "歷史機率加權演算法 (依統計機率分配權重)":
+                    pool = freq_df['number'].tolist()
+                    weights = freq_df['count'].tolist()
+                    
+                    # 避免防呆：剛建置資料庫時若權重全為0
+                    if sum(weights) == 0:
+                        weights = [1] * len(pool)
+                        
+                    temp_picks = set()
+                    # 利用 weighted choice 抽出 6 個不重複的號碼
+                    while len(temp_picks) < 6:
+                        # random.choices 會根據 weights (歷史次數) 來決定抽中機率
+                        choice = random.choices(pool, weights=weights, k=1)[0]
+                        temp_picks.add(choice)
+                    picks = sorted(list(temp_picks))
+
+                # --- 策略 2: 高期望值與常態分佈過濾法 ---
+                elif strategy == "高期望值與常態分佈過濾法 (資料科學推薦)":
                     valid_picks = False
                     attempts = 0
-                    # 偏好大於 31 的號碼 (避開生日陷阱，大號碼權重加倍)
                     pool = list(range(1, 32)) + list(range(32, 50)) * 2 
                     
                     while not valid_picks and attempts < 1000:
@@ -135,31 +152,29 @@ if page == "🤖 策略選號預測引擎":
                         total_sum = sum(temp_picks)
                         odds = sum(1 for n in temp_picks if n % 2 != 0)
                         
-                        # 嚴格過濾：和值介於 120~180，且奇偶比為 2:4, 3:3 或 4:2
                         if 120 <= total_sum <= 180 and (odds in [2, 3, 4]):
                             picks = temp_picks
                             valid_picks = True
                             
-                    # 若極端情況下 1000 次都沒配出來，則給予隨機
                     if not valid_picks:
                         picks = random.sample(range(1, 50), 6)
 
-                # --- 策略 2: 均衡演算法 ---
+                # --- 策略 3: 均衡演算法 ---
                 elif strategy == "均衡演算法 (熱門+冷門+隨機)":
                     picks = random.sample(hot_numbers, 2) + random.sample(cold_numbers, 2)
                     while len(picks) < 6:
                         n = random.randint(1, 49)
                         if n not in picks: picks.append(n)
                 
-                # --- 策略 3: 追熱牌 ---
+                # --- 策略 4: 追熱牌 ---
                 elif strategy == "追熱牌策略 (從最常開出號碼挑選)":
                     picks = random.sample(hot_numbers, 6)
                 
-                # --- 策略 4: 搏冷門 ---
+                # --- 策略 5: 搏冷門 ---
                 elif strategy == "搏冷門策略 (從最少開出號碼挑選)":
                     picks = random.sample(cold_numbers, 6)
                     
-                # --- 策略 5: 純隨機 ---
+                # --- 策略 6: 純隨機 ---
                 else: 
                     picks = random.sample(range(1, 50), 6)
                 
@@ -180,6 +195,12 @@ if page == "🤖 策略選號預測引擎":
                     odds_cnt = sum(1 for n in picks if n % 2 != 0)
                     metrics_html = f"<div style='margin-top:10px; font-size:14px; color:#555;'>" \
                                    f"📊 指標分析 ➔ 和值: <b>{sum(picks)}</b> | 奇偶比: <b>{odds_cnt}:{6-odds_cnt}</b>" \
+                                   f"</div>"
+                elif strategy == "歷史機率加權演算法 (依統計機率分配權重)":
+                    # 計算這組號碼的歷史總出現次數，展示其「含金量」
+                    total_hist_count = sum([freq_df[freq_df['number'] == n]['count'].values[0] for n in picks if n in freq_df['number'].values])
+                    metrics_html = f"<div style='margin-top:10px; font-size:14px; color:#555;'>" \
+                                   f"📈 機率權重 ➔ 歷史總計開出: <b>{total_hist_count}</b> 次 (偏向高機率區間)" \
                                    f"</div>"
 
                 st.markdown(
@@ -205,7 +226,6 @@ elif page == "📊 常規獎號歷史分析":
         c1, c2, c3 = st.columns(3)
         c1.metric("總收錄期數", f"{len(df_main)} 期")
         
-        # 這裡已經加入了 int() 強制轉型，徹底解決 ValueError 的問題！
         c2.metric("最熱門號碼", f"{int(freq_df.iloc[0]['number']):02d} ({int(freq_df.iloc[0]['count'])}次)")
         c3.metric("最冷門號碼", f"{int(freq_df.iloc[-1]['number']):02d} ({int(freq_df.iloc[-1]['count'])}次)")
         
