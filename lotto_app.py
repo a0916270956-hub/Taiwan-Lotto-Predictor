@@ -5,40 +5,57 @@ import os
 import random
 
 # ==========================================
-# 1. 系統初始化與資料庫建置 (自動化)
+# 1. 系統智慧初始化與動態同步機制 (修正核心)
 # ==========================================
 DB_NAME = "lotto.db"
 MAIN_CSV = "lotto_2007_2026.csv"
 EXTRA_CSV = "lotto_extra_2011_2026.csv"
 
-@st.cache_resource
 def init_database():
-    """如果資料庫不存在，則自動讀取 CSV 建立資料庫"""
-    if not os.path.exists(DB_NAME):
-        st.info("🔄 系統首次啟動或雲端重啟，正在為您自動建置大樂透資料庫，請稍候...")
-        conn = sqlite3.connect(DB_NAME)
-        
-        try:
-            # 處理常規大樂透
-            if os.path.exists(MAIN_CSV):
-                df_main = pd.read_csv(MAIN_CSV)
-                df_main.to_sql('lotto_history', conn, if_exists='replace', index=False)
-                conn.execute('CREATE INDEX idx_draw_date ON lotto_history(draw_date)')
-            
-            # 處理加碼大樂透
-            if os.path.exists(EXTRA_CSV):
-                df_extra = pd.read_csv(EXTRA_CSV)
-                df_extra.to_sql('lotto_bonus_history', conn, if_exists='replace', index=False)
-                conn.execute('CREATE INDEX idx_bonus_period ON lotto_bonus_history(period)')
-            
-            conn.commit()
-            st.success("✅ 資料庫建置完成！")
-        except Exception as e:
-            st.error(f"❌ 資料庫建置失敗，錯誤: {e}")
-        finally:
-            conn.close()
+    """動態比對 CSV 筆數，自動更新並清洗最新數據進資料庫"""
+    conn = sqlite3.connect(DB_NAME)
+    need_refresh_cache = False
+    
+    # --- A. 檢查並更新常規大樂透 ---
+    try:
+        db_main_count = pd.read_sql_query("SELECT COUNT(*) as cnt FROM lotto_history", conn).iloc[0]['cnt']
+    except Exception:
+        db_main_count = 0
 
-# 執行初始化
+    if os.path.exists(MAIN_CSV):
+        df_main = pd.read_csv(MAIN_CSV)
+        # 強制將日期格式中的 '/' 替換為 '-'，避免排序錯亂
+        df_main['draw_date'] = df_main['draw_date'].astype(str).str.replace('/', '-')
+        
+        # 若 CSV 筆數與資料庫不一致，代表有新號碼移入，立即同步
+        if len(df_main) != db_main_count:
+            df_main.to_sql('lotto_history', conn, if_exists='replace', index=False)
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_draw_date ON lotto_history(draw_date)')
+            need_refresh_cache = True
+
+    # --- B. 檢查並更新加碼大樂透 ---
+    try:
+        db_bonus_count = pd.read_sql_query("SELECT COUNT(*) as cnt FROM lotto_bonus_history", conn).iloc[0]['cnt']
+    except Exception:
+        db_bonus_count = 0
+
+    if os.path.exists(EXTRA_CSV):
+        df_extra = pd.read_csv(EXTRA_CSV)
+        df_extra['draw_date'] = df_extra['draw_date'].astype(str).str.replace('/', '-')
+        
+        if len(df_extra) != db_bonus_count:
+            df_extra.to_sql('lotto_bonus_history', conn, if_exists='replace', index=False)
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_bonus_period ON lotto_bonus_history(period)')
+            need_refresh_cache = True
+
+    conn.commit()
+    conn.close()
+
+    # --- C. 若資料有更新，強制清除 Streamlit 快取，讓網頁立刻顯示最新獎號 ---
+    if need_refresh_cache:
+        st.cache_data.clear()
+
+# 執行初始化檢查
 init_database()
 
 # ==========================================
@@ -60,12 +77,11 @@ def get_number_frequencies():
         freq = all_nums.value_counts().reset_index()
         freq.columns = ['number', 'count']
         
-        # 強制將號碼轉換為整數
+        # 強制將號碼轉換為標準整數，防止浮點數型態報錯
         freq['number'] = freq['number'].astype(int)
         
         return freq.sort_values(by='count', ascending=False)
     except Exception:
-        # 避免資料庫尚未完全建置時引發錯誤
         return pd.DataFrame({'number': list(range(1, 50)), 'count': [0]*49})
 
 # ==========================================
@@ -80,11 +96,11 @@ page = st.sidebar.radio("請選擇功能模組", [
     "🧧 加碼活動數據查詢"
 ])
 
-# 取得頻率資料供後續使用
+# 取得最新頻率數據
 freq_df = get_number_frequencies()
 if not freq_df.empty and freq_df['count'].sum() > 0:
-    hot_numbers = freq_df.head(15)['number'].tolist()  # 前 15 大熱門
-    cold_numbers = freq_df.tail(15)['number'].tolist() # 最後 15 大冷門
+    hot_numbers = freq_df.head(15)['number'].tolist()  
+    cold_numbers = freq_df.tail(15)['number'].tolist() 
 else:
     hot_numbers = list(range(1, 16))
     cold_numbers = list(range(35, 50))
@@ -101,7 +117,7 @@ if page == "🤖 策略選號預測引擎":
     with col1:
         st.subheader("⚙️ 參數設定")
         strategy = st.selectbox("請選擇預測策略：", [
-            "歷史機率加權演算法 (依統計機率分配權重)", # 🌟 新增的機率預測模型
+            "歷史機率加權演算法 (依統計機率分配權重)", 
             "高期望值與常態分佈過濾法 (資料科學推薦)",
             "均衡演算法 (熱門+冷門+隨機)", 
             "追熱牌策略 (從最常開出號碼挑選)", 
@@ -122,14 +138,11 @@ if page == "🤖 策略選號預測引擎":
                     pool = freq_df['number'].tolist()
                     weights = freq_df['count'].tolist()
                     
-                    # 避免防呆：剛建置資料庫時若權重全為0
                     if sum(weights) == 0:
                         weights = [1] * len(pool)
                         
                     temp_picks = set()
-                    # 利用 weighted choice 抽出 6 個不重複的號碼
                     while len(temp_picks) < 6:
-                        # random.choices 會根據 weights (歷史次數) 來決定抽中機率
                         choice = random.choices(pool, weights=weights, k=1)[0]
                         temp_picks.add(choice)
                     picks = sorted(list(temp_picks))
@@ -180,7 +193,7 @@ if page == "🤖 策略選號預測引擎":
                 
                 picks.sort()
                 
-                # 視覺化顯示號碼 (仿真實彩球)
+                # 視覺化模擬彩球
                 html_balls = "".join([
                     f"<span style='display:inline-block; width:45px; height:45px; line-height:45px; "
                     f"text-align:center; background-color:#ffcc00; color:#333; border-radius:50%; "
@@ -189,7 +202,6 @@ if page == "🤖 策略選號預測引擎":
                     for n in picks
                 ])
                 
-                # 附加數據科學指標顯示
                 metrics_html = ""
                 if strategy == "高期望值與常態分佈過濾法 (資料科學推薦)":
                     odds_cnt = sum(1 for n in picks if n % 2 != 0)
@@ -197,10 +209,9 @@ if page == "🤖 策略選號預測引擎":
                                    f"📊 指標分析 ➔ 和值: <b>{sum(picks)}</b> | 奇偶比: <b>{odds_cnt}:{6-odds_cnt}</b>" \
                                    f"</div>"
                 elif strategy == "歷史機率加權演算法 (依統計機率分配權重)":
-                    # 計算這組號碼的歷史總出現次數，展示其「含金量」
                     total_hist_count = sum([freq_df[freq_df['number'] == n]['count'].values[0] for n in picks if n in freq_df['number'].values])
                     metrics_html = f"<div style='margin-top:10px; font-size:14px; color:#555;'>" \
-                                   f"📈 機率權重 ➔ 歷史總計開出: <b>{total_hist_count}</b> 次 (偏向高機率區間)" \
+                                   f"📈 機率權重 ➔ 歷史總計開出: <b>{total_hist_count}</b> 次 (偏向高機率熱門區間)" \
                                    f"</div>"
 
                 st.markdown(
@@ -226,8 +237,9 @@ elif page == "📊 常規獎號歷史分析":
         c1, c2, c3 = st.columns(3)
         c1.metric("總收錄期數", f"{len(df_main)} 期")
         
-        c2.metric("最熱門號碼", f"{int(freq_df.iloc[0]['number']):02d} ({int(freq_df.iloc[0]['count'])}次)")
-        c3.metric("最冷門號碼", f"{int(freq_df.iloc[-1]['number']):02d} ({int(freq_df.iloc[-1]['count'])}次)")
+        if not freq_df.empty and freq_df['count'].sum() > 0:
+            c2.metric("最熱門號碼", f"{int(freq_df.iloc[0]['number']):02d} ({int(freq_df.iloc[0]['count'])}次)")
+            c3.metric("最冷門號碼", f"{int(freq_df.iloc[-1]['number']):02d} ({int(freq_df.iloc[-1]['count'])}次)")
         
         st.subheader("📈 歷年號碼開出頻率分佈圖")
         chart_data = freq_df.sort_values(by='number').set_index('number')
@@ -236,7 +248,7 @@ elif page == "📊 常規獎號歷史分析":
         st.subheader("📋 原始開獎紀錄")
         st.dataframe(df_main, use_container_width=True)
     except Exception as e:
-        st.warning(f"⚠️ 尚未讀取到資料，請確認資料庫是否建置成功。錯誤訊息: {e}")
+        st.warning(f"⚠️ 讀取歷史數據庫時發生未知錯誤。詳細資訊: {e}")
 
 # ------------------------------------------
 # 模組 C：加碼活動數據查詢
@@ -254,16 +266,15 @@ elif page == "🧧 加碼活動數據查詢":
             filtered_df = df_bonus[df_bonus['bonus_name'] == selected_event]
             st.metric(f"共開出組數", f"{len(filtered_df)} 組")
             
-            # 清除全部都是 NaN (空值) 的欄位以保持版面乾淨
             display_df = filtered_df.dropna(axis=1, how='all')
             
-            # 強制將號碼轉為沒有小數點的格式顯示
+            # 清理浮點數型態，格式化號碼顯示
             for col in display_df.columns:
                 if col.startswith('num'):
-                    display_df[col] = display_df[col].apply(lambda x: f"{int(x):02d}" if pd.notnull(x) else "")
+                    display_df[col] = display_df[col].apply(lambda x: f"{int(x):02d}" if pd.notnull(x) and str(x).replace('.0','').isdigit() else "")
                     
             st.dataframe(display_df, use_container_width=True, height=500)
         else:
             st.info("資料庫中目前沒有加碼活動資料。")
     except Exception as e:
-        st.warning(f"⚠️ 尚未讀取到加碼資料，請確認資料庫是否建置成功。錯誤訊息: {e}")
+        st.warning(f"⚠️ 讀取加碼數據庫時發生未知錯誤。詳細資訊: {e}")
