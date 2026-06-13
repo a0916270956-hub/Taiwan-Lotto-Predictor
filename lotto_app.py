@@ -15,19 +15,17 @@ EXTRA_CSV = "lotto_extra_2011_2026.csv"
 
 st.sidebar.title("🎯 系統導覽")
 
-# 🌟 新增：核彈級強制同步按鈕
+# 🌟 核彈級強制同步按鈕
 st.sidebar.markdown("---")
 if st.sidebar.button("🔄 強制同步最新資料", type="primary", help="上傳新 CSV 檔後請點擊此按鈕"):
-    # 1. 清空 Streamlit 記憶體快取
+    # 清空快取與舊資料庫
     st.cache_data.clear()
     st.cache_resource.clear()
-    # 2. 強制刪除舊的 SQLite 資料庫檔案
     try:
         if os.path.exists(DB_NAME):
             os.remove(DB_NAME)
     except Exception as e:
         pass
-    # 3. 重新載入網頁
     st.success("✅ 系統已重置，正在為您載入最新開獎數據...")
     st.rerun()
 
@@ -39,26 +37,26 @@ page = st.sidebar.radio("請選擇功能模組", [
 ])
 
 # ==========================================
-# 1. 系統初始化與資料庫建置
+# 1. 系統初始化與資料庫建置 (修正日期排序 Bug)
 # ==========================================
 @st.cache_resource
 def init_database():
-    """只有在找不到資料庫時，才會讀取 CSV 建立全新資料庫"""
     if not os.path.exists(DB_NAME):
         conn = sqlite3.connect(DB_NAME)
-        
         try:
             # 處理常規大樂透
             if os.path.exists(MAIN_CSV):
                 df_main = pd.read_csv(MAIN_CSV)
-                df_main['draw_date'] = df_main['draw_date'].astype(str).str.replace('/', '-')
+                # 🌟 關鍵修正：強制將所有日期轉為 YYYY-MM-DD 標準格式 (解決 3月 大於 10月 的排序問題)
+                df_main['draw_date'] = pd.to_datetime(df_main['draw_date'], errors='coerce').dt.strftime('%Y-%m-%d')
                 df_main.to_sql('lotto_history', conn, if_exists='replace', index=False)
                 conn.execute('CREATE INDEX IF NOT EXISTS idx_draw_date ON lotto_history(draw_date)')
             
             # 處理加碼大樂透
             if os.path.exists(EXTRA_CSV):
                 df_extra = pd.read_csv(EXTRA_CSV)
-                df_extra['draw_date'] = df_extra['draw_date'].astype(str).str.replace('/', '-')
+                # 🌟 關鍵修正：同樣標準化加碼資料的日期
+                df_extra['draw_date'] = pd.to_datetime(df_extra['draw_date'], errors='coerce').dt.strftime('%Y-%m-%d')
                 df_extra.to_sql('lotto_bonus_history', conn, if_exists='replace', index=False)
                 conn.execute('CREATE INDEX IF NOT EXISTS idx_bonus_period ON lotto_bonus_history(period)')
             
@@ -68,21 +66,18 @@ def init_database():
         finally:
             conn.close()
 
-# 確保資料庫存在
 init_database()
 
 # ==========================================
-# 2. 共用資料讀取函數 (🌟 拔除快取封印，確保每次拿最新資料)
+# 2. 共用資料讀取函數 
 # ==========================================
 def load_data(query):
-    """直接對 SQL 下指令，不使用記憶體快取"""
     conn = sqlite3.connect(DB_NAME)
     df = pd.read_sql_query(query, conn)
     conn.close()
     return df
 
 def get_number_frequencies():
-    """計算所有號碼的歷史出現頻率"""
     try:
         df = load_data("SELECT num1, num2, num3, num4, num5, num6 FROM lotto_history")
         all_nums = pd.concat([df['num1'], df['num2'], df['num3'], df['num4'], df['num5'], df['num6']])
@@ -93,7 +88,6 @@ def get_number_frequencies():
     except Exception:
         return pd.DataFrame({'number': list(range(1, 50)), 'count': [0]*49})
 
-# 取得最新頻率數據
 freq_df = get_number_frequencies()
 if not freq_df.empty and freq_df['count'].sum() > 0:
     hot_numbers = freq_df.head(15)['number'].tolist()  
@@ -130,26 +124,20 @@ if page == "🤖 策略選號預測引擎":
             for i in range(generate_count):
                 picks = []
                 
-                # --- 策略 1: 歷史機率加權演算法 (統計概率) ---
                 if strategy == "歷史機率加權演算法 (依統計機率分配權重)":
                     pool = freq_df['number'].tolist()
                     weights = freq_df['count'].tolist()
-                    
-                    if sum(weights) == 0:
-                        weights = [1] * len(pool)
-                        
+                    if sum(weights) == 0: weights = [1] * len(pool)
                     temp_picks = set()
                     while len(temp_picks) < 6:
                         choice = random.choices(pool, weights=weights, k=1)[0]
                         temp_picks.add(choice)
                     picks = sorted(list(temp_picks))
 
-                # --- 策略 2: 高期望值與常態分佈過濾法 ---
                 elif strategy == "高期望值與常態分佈過濾法 (資料科學推薦)":
                     valid_picks = False
                     attempts = 0
                     pool = list(range(1, 32)) + list(range(32, 50)) * 2 
-                    
                     while not valid_picks and attempts < 1000:
                         attempts += 1
                         temp_picks = []
@@ -157,40 +145,31 @@ if page == "🤖 策略選號預測引擎":
                             new_num = random.choice(pool)
                             if new_num not in temp_picks:
                                 temp_picks.append(new_num)
-                        
                         temp_picks.sort()
                         total_sum = sum(temp_picks)
                         odds = sum(1 for n in temp_picks if n % 2 != 0)
-                        
                         if 120 <= total_sum <= 180 and (odds in [2, 3, 4]):
                             picks = temp_picks
                             valid_picks = True
-                            
-                    if not valid_picks:
-                        picks = random.sample(range(1, 50), 6)
+                    if not valid_picks: picks = random.sample(range(1, 50), 6)
 
-                # --- 策略 3: 均衡演算法 ---
                 elif strategy == "均衡演算法 (熱門+冷門+隨機)":
                     picks = random.sample(hot_numbers, 2) + random.sample(cold_numbers, 2)
                     while len(picks) < 6:
                         n = random.randint(1, 49)
                         if n not in picks: picks.append(n)
                 
-                # --- 策略 4: 追熱牌 ---
                 elif strategy == "追熱牌策略 (從最常開出號碼挑選)":
                     picks = random.sample(hot_numbers, 6)
                 
-                # --- 策略 5: 搏冷門 ---
                 elif strategy == "搏冷門策略 (從最少開出號碼挑選)":
                     picks = random.sample(cold_numbers, 6)
                     
-                # --- 策略 6: 純隨機 ---
                 else: 
                     picks = random.sample(range(1, 50), 6)
                 
                 picks.sort()
                 
-                # 視覺化模擬彩球
                 html_balls = "".join([
                     f"<span style='display:inline-block; width:45px; height:45px; line-height:45px; "
                     f"text-align:center; background-color:#ffcc00; color:#333; border-radius:50%; "
@@ -232,7 +211,7 @@ elif page == "📊 常規獎號歷史分析":
         df_main = load_data("SELECT * FROM lotto_history ORDER BY draw_date DESC")
         
         c1, c2, c3 = st.columns(3)
-        c1.metric("總收錄期數", f"{len(df_main)} 期")
+        c1.metric("資料庫總收錄期數", f"{len(df_main)} 期")
         
         if not freq_df.empty and freq_df['count'].sum() > 0:
             c2.metric("最熱門號碼", f"{int(freq_df.iloc[0]['number']):02d} ({int(freq_df.iloc[0]['count'])}次)")
@@ -242,7 +221,7 @@ elif page == "📊 常規獎號歷史分析":
         chart_data = freq_df.sort_values(by='number').set_index('number')
         st.bar_chart(chart_data)
         
-        st.subheader("📋 原始開獎紀錄")
+        st.subheader("📋 原始開獎紀錄 (最新期數應位於最上方)")
         st.dataframe(df_main, use_container_width=True)
     except Exception as e:
         st.warning(f"⚠️ 讀取歷史數據庫時發生未知錯誤。詳細資訊: {e}")
@@ -265,7 +244,6 @@ elif page == "🧧 加碼活動數據查詢":
             
             display_df = filtered_df.dropna(axis=1, how='all')
             
-            # 清理浮點數型態，格式化號碼顯示
             for col in display_df.columns:
                 if col.startswith('num'):
                     display_df[col] = display_df[col].apply(lambda x: f"{int(x):02d}" if pd.notnull(x) and str(x).replace('.0','').isdigit() else "")
