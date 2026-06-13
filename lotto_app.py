@@ -5,70 +5,82 @@ import os
 import random
 
 # ==========================================
-# 1. 系統智慧初始化與動態同步機制 (修正核心)
+# 0. 全域設定與側邊欄導覽
 # ==========================================
+st.set_page_config(page_title="大樂透 AI 預測與分析系統", page_icon="🎯", layout="wide")
+
 DB_NAME = "lotto.db"
 MAIN_CSV = "lotto_2007_2026.csv"
 EXTRA_CSV = "lotto_extra_2011_2026.csv"
 
+st.sidebar.title("🎯 系統導覽")
+
+# 🌟 新增：核彈級強制同步按鈕
+st.sidebar.markdown("---")
+if st.sidebar.button("🔄 強制同步最新資料", type="primary", help="上傳新 CSV 檔後請點擊此按鈕"):
+    # 1. 清空 Streamlit 記憶體快取
+    st.cache_data.clear()
+    st.cache_resource.clear()
+    # 2. 強制刪除舊的 SQLite 資料庫檔案
+    try:
+        if os.path.exists(DB_NAME):
+            os.remove(DB_NAME)
+    except Exception as e:
+        pass
+    # 3. 重新載入網頁
+    st.success("✅ 系統已重置，正在為您載入最新開獎數據...")
+    st.rerun()
+
+st.sidebar.markdown("---")
+page = st.sidebar.radio("請選擇功能模組", [
+    "🤖 策略選號預測引擎", 
+    "📊 常規獎號歷史分析", 
+    "🧧 加碼活動數據查詢"
+])
+
+# ==========================================
+# 1. 系統初始化與資料庫建置
+# ==========================================
+@st.cache_resource
 def init_database():
-    """動態比對 CSV 筆數，自動更新並清洗最新數據進資料庫"""
-    conn = sqlite3.connect(DB_NAME)
-    need_refresh_cache = False
-    
-    # --- A. 檢查並更新常規大樂透 ---
-    try:
-        db_main_count = pd.read_sql_query("SELECT COUNT(*) as cnt FROM lotto_history", conn).iloc[0]['cnt']
-    except Exception:
-        db_main_count = 0
-
-    if os.path.exists(MAIN_CSV):
-        df_main = pd.read_csv(MAIN_CSV)
-        # 強制將日期格式中的 '/' 替換為 '-'，避免排序錯亂
-        df_main['draw_date'] = df_main['draw_date'].astype(str).str.replace('/', '-')
+    """只有在找不到資料庫時，才會讀取 CSV 建立全新資料庫"""
+    if not os.path.exists(DB_NAME):
+        conn = sqlite3.connect(DB_NAME)
         
-        # 若 CSV 筆數與資料庫不一致，代表有新號碼移入，立即同步
-        if len(df_main) != db_main_count:
-            df_main.to_sql('lotto_history', conn, if_exists='replace', index=False)
-            conn.execute('CREATE INDEX IF NOT EXISTS idx_draw_date ON lotto_history(draw_date)')
-            need_refresh_cache = True
+        try:
+            # 處理常規大樂透
+            if os.path.exists(MAIN_CSV):
+                df_main = pd.read_csv(MAIN_CSV)
+                df_main['draw_date'] = df_main['draw_date'].astype(str).str.replace('/', '-')
+                df_main.to_sql('lotto_history', conn, if_exists='replace', index=False)
+                conn.execute('CREATE INDEX IF NOT EXISTS idx_draw_date ON lotto_history(draw_date)')
+            
+            # 處理加碼大樂透
+            if os.path.exists(EXTRA_CSV):
+                df_extra = pd.read_csv(EXTRA_CSV)
+                df_extra['draw_date'] = df_extra['draw_date'].astype(str).str.replace('/', '-')
+                df_extra.to_sql('lotto_bonus_history', conn, if_exists='replace', index=False)
+                conn.execute('CREATE INDEX IF NOT EXISTS idx_bonus_period ON lotto_bonus_history(period)')
+            
+            conn.commit()
+        except Exception as e:
+            st.sidebar.error(f"資料庫建置發生異常: {e}")
+        finally:
+            conn.close()
 
-    # --- B. 檢查並更新加碼大樂透 ---
-    try:
-        db_bonus_count = pd.read_sql_query("SELECT COUNT(*) as cnt FROM lotto_bonus_history", conn).iloc[0]['cnt']
-    except Exception:
-        db_bonus_count = 0
-
-    if os.path.exists(EXTRA_CSV):
-        df_extra = pd.read_csv(EXTRA_CSV)
-        df_extra['draw_date'] = df_extra['draw_date'].astype(str).str.replace('/', '-')
-        
-        if len(df_extra) != db_bonus_count:
-            df_extra.to_sql('lotto_bonus_history', conn, if_exists='replace', index=False)
-            conn.execute('CREATE INDEX IF NOT EXISTS idx_bonus_period ON lotto_bonus_history(period)')
-            need_refresh_cache = True
-
-    conn.commit()
-    conn.close()
-
-    # --- C. 若資料有更新，強制清除 Streamlit 快取，讓網頁立刻顯示最新獎號 ---
-    if need_refresh_cache:
-        st.cache_data.clear()
-
-# 執行初始化檢查
+# 確保資料庫存在
 init_database()
 
 # ==========================================
-# 2. 共用資料讀取函數
+# 2. 共用資料讀取函數 (🌟 拔除快取封印，確保每次拿最新資料)
 # ==========================================
-@st.cache_data
 def load_data(query):
+    """直接對 SQL 下指令，不使用記憶體快取"""
     conn = sqlite3.connect(DB_NAME)
     df = pd.read_sql_query(query, conn)
     conn.close()
     return df
 
-@st.cache_data
 def get_number_frequencies():
     """計算所有號碼的歷史出現頻率"""
     try:
@@ -76,25 +88,10 @@ def get_number_frequencies():
         all_nums = pd.concat([df['num1'], df['num2'], df['num3'], df['num4'], df['num5'], df['num6']])
         freq = all_nums.value_counts().reset_index()
         freq.columns = ['number', 'count']
-        
-        # 強制將號碼轉換為標準整數，防止浮點數型態報錯
         freq['number'] = freq['number'].astype(int)
-        
         return freq.sort_values(by='count', ascending=False)
     except Exception:
         return pd.DataFrame({'number': list(range(1, 50)), 'count': [0]*49})
-
-# ==========================================
-# 3. 網頁介面設計與路由
-# ==========================================
-st.set_page_config(page_title="大樂透 AI 預測與分析系統", page_icon="🎯", layout="wide")
-
-st.sidebar.title("🎯 系統導覽")
-page = st.sidebar.radio("請選擇功能模組", [
-    "🤖 策略選號預測引擎", 
-    "📊 常規獎號歷史分析", 
-    "🧧 加碼活動數據查詢"
-])
 
 # 取得最新頻率數據
 freq_df = get_number_frequencies()
